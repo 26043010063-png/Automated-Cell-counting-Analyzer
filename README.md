@@ -1,7 +1,6 @@
-# Automated-Cell-counting-Analyzer
-Automated Cell Counting and Morphology Analysis using Python
 
 # Automated Cell Counting & Morphology Analyzer
+Automated Cell Counting and Morphology Analysis using Python
 
 ## 1. Introduction
 
