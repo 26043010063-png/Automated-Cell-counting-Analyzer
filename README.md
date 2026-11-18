@@ -157,3 +157,279 @@ The Automated Cell Counting & Morphology Analyzer demonstrates how image process
 The project successfully generates cell detection images, numerical measurements, and graphical reports from microscopy images.
 
 This application is intended for educational and experimental purposes only and is not designed for medical diagnosis.
+main.py – Complete Python code
+
+import cv2
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import argparse
+from pathlib import Path
+
+
+def load_image(image_path):
+    image = cv2.imread(str(image_path))
+
+    if image is None:
+        raise ValueError("Image could not be loaded.")
+
+    return image
+
+
+def preprocess_image(image):
+    # Convert image into grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Remove noise using Gaussian Blur
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    return blurred
+
+
+def segment_cells(image):
+    # Apply Otsu thresholding
+    _, binary = cv2.threshold(
+        image, 0, 255,
+        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
+
+    # Morphological operations
+    kernel = np.ones((3, 3), np.uint8)
+
+    opening = cv2.morphologyEx(
+        binary, cv2.MORPH_OPEN, kernel, iterations=2
+    )
+
+    sure_background = cv2.dilate(
+        opening, kernel, iterations=3
+    )
+
+    # Distance transformation
+    distance = cv2.distanceTransform(
+        opening, cv2.DIST_L2, 5
+    )
+
+    _, sure_foreground = cv2.threshold(
+        distance,
+        0.35 * distance.max(),
+        255,
+        cv2.THRESH_BINARY
+    )
+
+    sure_foreground = np.uint8(sure_foreground)
+
+    unknown = cv2.subtract(
+        sure_background, sure_foreground
+    )
+
+    # Connected components
+    _, markers = cv2.connectedComponents(
+        sure_foreground
+    )
+
+    markers = markers + 1
+    markers[unknown == 255] = 0
+
+    # Watershed algorithm
+    markers = cv2.watershed(
+        cv2.cvtColor(image, cv2.COLOR_GRAY2BGR),
+        markers
+    )
+
+    return markers
+
+
+def measure_cells(markers, min_area=50):
+
+    measurements = []
+
+    for label in np.unique(markers):
+
+        if label <= 1:
+            continue
+
+        mask = np.uint8(markers == label)
+
+        area = cv2.countNonZero(mask)
+
+        if area < min_area:
+            continue
+
+        contours, _ = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        if not contours:
+            continue
+
+        contour = max(contours, key=cv2.contourArea)
+
+        perimeter = cv2.arcLength(contour, True)
+
+        moments = cv2.moments(mask)
+
+        if moments["m00"] == 0:
+            continue
+
+        cx = moments["m10"] / moments["m00"]
+        cy = moments["m01"] / moments["m00"]
+
+        # Calculate circularity
+        circularity = (
+            4 * np.pi * area / (perimeter ** 2)
+            if perimeter > 0 else 0
+        )
+
+        # Equivalent diameter
+        diameter = np.sqrt(4 * area / np.pi)
+
+        measurements.append({
+            "Cell ID": len(measurements) + 1,
+            "Area": area,
+            "Perimeter": round(perimeter, 2),
+            "Circularity": round(circularity, 4),
+            "Equivalent Diameter": round(diameter, 2),
+            "Centroid X": round(cx, 2),
+            "Centroid Y": round(cy, 2)
+        })
+
+    return pd.DataFrame(measurements)
+
+
+def save_detected_image(image, markers, df, output_folder):
+
+    output_image = image.copy()
+
+    for label in np.unique(markers):
+
+        if label <= 1:
+            continue
+
+        mask = np.uint8(markers == label)
+
+        contours, _ = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        cv2.drawContours(
+            output_image,
+            contours,
+            -1,
+            (0, 255, 0),
+            2
+        )
+
+    for row in df.itertuples():
+
+        x = int(row._6)
+        y = int(row._7)
+
+        cv2.circle(
+            output_image, (x, y), 3, (0, 0, 255), -1
+        )
+
+    cv2.imwrite(
+        str(output_folder / "detected_cells.png"),
+        output_image
+    )
+
+
+def save_histogram(df, output_folder):
+
+    plt.figure(figsize=(8, 5))
+
+    if not df.empty:
+        plt.hist(
+            df["Area"],
+            bins=20,
+            edgecolor="black"
+        )
+
+    plt.title("Cell Area Distribution")
+    plt.xlabel("Cell Area (Pixels)")
+    plt.ylabel("Number of Cells")
+
+    plt.tight_layout()
+
+    plt.savefig(
+        output_folder / "cell_area_distribution.png"
+    )
+
+    plt.close()
+
+
+def main():
+
+    parser = argparse.ArgumentParser(
+        description="Automated Cell Counting Analyzer"
+    )
+
+    parser.add_argument(
+        "--image",
+        required=True,
+        help="Input microscopy image"
+    )
+
+    parser.add_argument(
+        "--min-area",
+        type=int,
+        default=50
+    )
+
+    args = parser.parse_args()
+
+    output_folder = Path("results")
+    output_folder.mkdir(exist_ok=True)
+
+    # Load image
+    image = load_image(args.image)
+
+    # Preprocessing
+    gray = preprocess_image(image)
+
+    # Cell segmentation
+    markers = segment_cells(gray)
+
+    # Morphological measurements
+    df = measure_cells(markers, args.min_area)
+
+    # Save CSV file
+    df.to_csv(
+        output_folder / "cell_measurements.csv",
+        index=False
+    )
+
+    # Save detected image
+    save_detected_image(
+        image, markers, df, output_folder
+    )
+
+    # Save histogram
+    save_histogram(df, output_folder)
+
+    # Display report
+    print("\n===== CELL ANALYSIS REPORT =====")
+
+    print("Total Cells:", len(df))
+
+    if not df.empty:
+
+        print(
+            "Average Area:",
+            round(df["Area"].mean(), 2)
+        )
+
+        print(
+            "Average Circularity:",
+            round(df["Circularity"].mean(), 4)
+        )
+
+    print("\nAnalysis Completed Successfully!")
+
+
+if __name__ == "__main__":
+    main()
